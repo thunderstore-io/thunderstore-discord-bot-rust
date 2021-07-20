@@ -1,17 +1,17 @@
 use serde_json::json;
 use serenity::{client::Context, framework::standard::{CommandResult, macros::command}, model::channel::Message};
 
-use crate::{TunnelInfo, TunnelsContainer};
-
-const THUNDERSTORE_GUILD_ID: u64 = 335090384055042060;
-const TUNNEL_CATEGORY_ID: u64 = 866896866377072670;
+use crate::{BotConfig, TunnelInfo, TunnelsContainer};
 
 #[command]
 async fn link(ctx: &Context, msg: &Message) -> CommandResult {
-    let tstore_channel = ctx.http.create_channel(THUNDERSTORE_GUILD_ID, json!({
+    let mut data = ctx.data.write().await;
+    let config = data.get::<BotConfig>().unwrap();
+
+    let tstore_channel = ctx.http.create_channel(config.thunderstore_guild_id, json!({
         "name": msg.guild(ctx).await.unwrap().name,
         "type": 0,
-        "parent_id": TUNNEL_CATEGORY_ID
+        "parent_id": config.thunderstore_category_id
     }).as_object().unwrap())
     .await?;
 
@@ -25,7 +25,6 @@ async fn link(ctx: &Context, msg: &Message) -> CommandResult {
     }))
     .await?;
 
-    let mut data = ctx.data.write().await;
     let tunnels = data.get_mut::<TunnelsContainer>().unwrap();
     
     tunnels.push(TunnelInfo {
@@ -36,6 +35,8 @@ async fn link(ctx: &Context, msg: &Message) -> CommandResult {
     });
 
     std::fs::write("cache/tunnels.json", serde_json::to_string_pretty(tunnels).unwrap())?;
+
+    msg.channel_id.say(&ctx, "Finished linking channels").await?;
 
     Ok(())
 }
@@ -51,6 +52,8 @@ async fn unlink(ctx: &Context, msg: &Message) -> CommandResult {
     tunnels.retain(|x| x.thunderstore_channel_id != id && x.other_channel_id != id);
 
     std::fs::write("cache/tunnels.json", serde_json::to_string_pretty(tunnels).unwrap())?;
+
+    msg.channel_id.say(&ctx, "Finished unlinking channels (the channels and webhooks still exist, please remove them manually)").await?;
 
     Ok(())
 }

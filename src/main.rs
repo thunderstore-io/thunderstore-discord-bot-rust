@@ -34,12 +34,22 @@ impl TypeMapKey for TunnelsContainer {
     type Value = Vec<TunnelInfo>;
 }
 
+struct BotConfig {
+    thunderstore_guild_id: u64,
+    thunderstore_category_id: u64,
+}
+
+impl TypeMapKey for BotConfig {
+    type Value = BotConfig;
+}
+
 struct TunnelHandler;
 
 #[async_trait]
 impl EventHandler for TunnelHandler {
     async fn message(&self, ctx: serenity::client::Context, msg: serenity::model::channel::Message) {
         if msg.author.bot { return; }
+        if msg.content.starts_with("~") { return; }
         
         let id = *msg.channel_id.as_u64();
 
@@ -52,7 +62,7 @@ impl EventHandler for TunnelHandler {
             reqwest::Client::default().post(url)
                 .json(&json!({
                     "content": msg.content_safe(&ctx).await,
-                    "username": msg.author.name,
+                    "username": format!("{}#{}", msg.author.name, msg.author.discriminator),
                     "avatar_url": msg.author.avatar_url().or(Some(msg.author.default_avatar_url())).unwrap()
                 }))
                 .send()
@@ -65,6 +75,8 @@ impl EventHandler for TunnelHandler {
 #[tokio::main]
 async fn main() {
     let token = env::var("DISCORD_TOKEN").expect("Expected a discord token in env");
+    let guild = u64::from_str_radix(&env::var("THUNDERSTORE_GUILD_ID").expect("Expected guild ID in env"), 10).expect("Invalid guild ID");
+    let category = u64::from_str_radix(&env::var("THUNDERSTORE_CATEGORY_ID").expect("Expected category ID in env"), 10).expect("Invalid cateogry ID");
 
     let http = Http::new_with_token(&token);
 
@@ -115,6 +127,10 @@ async fn main() {
 
     let mut data = client.data.write().await;
     data.insert::<TunnelsContainer>(tunnels);
+    data.insert::<BotConfig>(BotConfig {
+        thunderstore_guild_id: guild,
+        thunderstore_category_id: category,
+    });
     drop(data);
 
     let shard_man = client.shard_manager.clone();
