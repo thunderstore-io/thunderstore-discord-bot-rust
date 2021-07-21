@@ -1,7 +1,7 @@
 FROM rust:latest as builder
 WORKDIR /thunderstore-discord-bot-rust
 COPY . .
-RUN cargo install --path .
+RUN cargo install --locked --path .
 
 FROM debian:buster-slim
 RUN apt-get update && apt-get install -y openssl && rm -rf /var/lib/apt/lists/*
