@@ -1,7 +1,9 @@
 mod commands;
+mod util;
 
-use std::{collections::HashSet, env, io::Read};
+use std::{collections::HashSet, env};
 
+use mongodb::{Collection, Database, bson::doc};
 use serde_json::json;
 use serenity::{
     async_trait,
@@ -13,6 +15,7 @@ use serenity::{
 };
 
 use commands::{ping::*, tunnel::*};
+use util::u64_to_i64;
 
 use serde::{Deserialize, Serialize};
 
@@ -24,10 +27,10 @@ struct General;
 #[prefixes("tunnel")]
 #[owners_only]
 #[only_in(guilds)]
-#[commands(link, unlink)]
+#[commands(link, unlink, set_category)]
 struct Tunnel;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct TunnelInfo {
     other_channel_id: u64,
     thunderstore_channel_id: u64,
@@ -35,19 +38,31 @@ struct TunnelInfo {
     thunderstore_webhook_url: String,
 }
 
-struct TunnelsContainer;
+struct TunnelsCollection;
 
-impl TypeMapKey for TunnelsContainer {
-    type Value = Vec<TunnelInfo>;
+impl TypeMapKey for TunnelsCollection {
+    type Value = Collection<TunnelInfo>;
 }
 
+struct DatabaseContainer;
+
+impl TypeMapKey for DatabaseContainer {
+    type Value = Database;
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct BotConfig {
     thunderstore_guild_id: u64,
     thunderstore_category_id: u64,
 }
 
 impl TypeMapKey for BotConfig {
-    type Value = BotConfig;
+    type Value = Option<BotConfig>;
+}
+
+struct NetClient;
+impl TypeMapKey for NetClient {
+    type Value = reqwest::Client;
 }
 
 struct TunnelHandler;
@@ -70,14 +85,15 @@ impl EventHandler for TunnelHandler {
             return;
         }
 
-        let id = *msg.channel_id.as_u64();
+        let id = msg.channel_id.0;
 
         let typemap = ctx.data.read().await;
-        let tunnels = typemap.get::<TunnelsContainer>().unwrap();
+        let tunnels = typemap.get::<TunnelsCollection>().unwrap();
+        let client = typemap.get::<NetClient>().unwrap();
 
-        if let Some(tunnel) = tunnels
-            .iter()
-            .find(|x| x.other_channel_id == id || x.thunderstore_channel_id == id)
+        let unsafe_id = u64_to_i64(id);
+
+        if let Some(tunnel) = tunnels.find_one(doc! { "$or": [ { "thunderstore_channel_id":unsafe_id }, { "other_channel_id":unsafe_id } ] }, None).await.unwrap()
         {
             let url = if id == tunnel.thunderstore_channel_id {
                 &tunnel.other_webhook_url
@@ -85,7 +101,7 @@ impl EventHandler for TunnelHandler {
                 &tunnel.thunderstore_webhook_url
             };
 
-            reqwest::Client::default().post(url)
+            client.post(url)
                 .json(&json!({
                     "content": msg.content_safe(&ctx).await,
                     "username": format!("{}#{}", msg.author.name, msg.author.discriminator),
@@ -101,18 +117,16 @@ impl EventHandler for TunnelHandler {
 #[tokio::main]
 async fn main() {
     dotenv::dotenv().ok();
+    
+    let token = env::var("DISCORD_TOKEN").expect("Expected a Discord bot token in env var DISCORD_TOKEN");
 
-    let token = env::var("DISCORD_TOKEN").expect("Expected a discord token in env");
-    let guild = u64::from_str_radix(
-        &env::var("THUNDERSTORE_GUILD_ID").expect("Expected guild ID in env"),
-        10,
-    )
-    .expect("Invalid guild ID");
-    let category = u64::from_str_radix(
-        &env::var("THUNDERSTORE_CATEGORY_ID").expect("Expected category ID in env"),
-        10,
-    )
-    .expect("Invalid cateogry ID");
+    let client = mongodb::Client::with_uri_str("mongodb://root:password@mongo:27017").await.unwrap();
+    let db = client.database("test");
+
+    let config = db.collection::<BotConfig>("settings").find_one(None, None).await.unwrap();
+    if config.is_none() {
+        println!("No settings object found, please use `~tunnel set_category` as your first command");
+    }
 
     let http = Http::new_with_token(&token);
 
@@ -146,27 +160,11 @@ async fn main() {
         .await
         .expect("Failed to create client");
 
-    if std::fs::read_dir("cache").is_err() {
-        std::fs::create_dir("cache").expect("Failed to create cache path")
-    }
-
-    let tunnels: Vec<TunnelInfo> = match std::fs::File::open("cache/tunnels.json") {
-        Ok(mut file) => {
-            let mut tunnels_json = String::new();
-            file.read_to_string(&mut tunnels_json)
-                .expect("Error reading from permanent tunnel file");
-
-            serde_json::from_str(&tunnels_json).expect("Error deserializing permanent tunnel json")
-        }
-        _ => Vec::new(),
-    };
-
     let mut data = client.data.write().await;
-    data.insert::<TunnelsContainer>(tunnels);
-    data.insert::<BotConfig>(BotConfig {
-        thunderstore_guild_id: guild,
-        thunderstore_category_id: category,
-    });
+    data.insert::<TunnelsCollection>(db.collection("tunnels"));
+    data.insert::<BotConfig>(config);
+    data.insert::<NetClient>(reqwest::Client::default());
+    data.insert::<DatabaseContainer>(db);
     drop(data);
 
     let shard_man = client.shard_manager.clone();
